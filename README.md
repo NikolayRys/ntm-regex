@@ -11,4 +11,11 @@ NTM machines to learn regex from data.
 * In the `artefacts` folder you can find the saved models.
 * In the `datasets` folder you can find the datasets used for the experiments.
 
+## Requirements
+* Python 3.9
+* Tensorflow 2.4+
+* CUDA 11.0+
+* cuDNN 8.0+
+* automata_toolkit 0.1.0
+
 Licenced as LGPLv3 because the initial code is based on the [Neural Turing Machines by Mark Collier](https://github.com/MarkPKCollier/NeuralTuringMachine)
