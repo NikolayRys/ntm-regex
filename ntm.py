@@ -5,14 +5,17 @@ import tensorflow as tf
 import collections
 import numpy as np
 
+# Structure for storing the NTM state
 NTMControllerState = collections.namedtuple('NTMControllerState',
                                             ('controller_state', 'read_vector_list', 'w_list', 'M'))
+
 
 # Controller state cell, original paper suggested Dense or LSTM
 def _single_cell(num_units):
     return tf.keras.layers.LSTMCell(num_units)
 
 
+# Expand the input tensor x along a specified axis by repeating it N times.
 def expand(x, axis, N):
     shape = list(x.shape)
     shape.insert(axis, 1)
@@ -21,27 +24,32 @@ def expand(x, axis, N):
     x = tf.tile(tf.reshape(x, shape), tile_shape)
     return x
 
+
 # Layers for learned parameter initialization
 def init_layer(units):
     return tf.keras.layers.Dense(units, use_bias=False)
 
 
+# Linear initializer for the controller
 def create_linear_initializer(input_size):
     return tf.keras.initializers.TruncatedNormal(stddev=1.0 / np.sqrt(input_size))
 
 
+# Connect the learned initialization vector in the computational graph
 def wire_li(layer):
     wired = layer(tf.ones([1, 1]))
     return wired
 
 
+# Cell class
 class NTMCell(tf.keras.layers.Layer):
     def __init__(self, controller_layers, controller_units, memory_size, memory_vector_dim, read_head_num,
                  write_head_num, addressing_mode='content_and_location', shift_range=1, output_dim=None, clip_value=20,
                  init_mode='constant',  # Best recommended init mode is 'constant'
-                 reuse=None,            # For compatibility with original script
+                 reuse=None,  # For compatibility with original script
                  name=None, **kwargs):  # For saving model
 
+        # Initialize the parent component
         parent = super(NTMCell, self)
         parent.__init__(name=name)
 
@@ -72,19 +80,21 @@ class NTMCell(tf.keras.layers.Layer):
         self.num_heads = self.read_head_num + self.write_head_num
         self.num_parameters_per_head = self.memory_vector_dim + 1 + 1 + (self.shift_range * 2 + 1) + 1
 
-        # Initialize internal layers
+        # Initialize internal controller layers
         self.controller = tf.keras.layers.StackedRNNCells(
             [_single_cell(num_units=self.controller_units) for _ in range(self.controller_layers)])
         self.read_layers = [init_layer(self.memory_vector_dim) for _ in range(self.read_head_num)]
         self.w_layers = [init_layer(self.memory_size) for _ in range(self.num_heads)]
 
+        # Initialize the head parameters layer
         self.parameters_layer = tf.keras.layers.Dense(
             self.num_parameters_per_head * self.num_heads + self.memory_vector_dim * 2 * self.write_head_num,
             kernel_initializer=create_linear_initializer(self.controller_units))
 
-        # Cannot initialize here because we don't know the output_dim yet, which depends on the input
+        # Cannot initialize output_layer here because, which depends on the input configuration
         self.output_layer = None
 
+        # Initialize the memory
         if self.init_mode == 'learned':
             self.memory_layer = init_layer(self.memory_size * self.memory_vector_dim)
         elif self.init_mode == 'random':
@@ -101,9 +111,8 @@ class NTMCell(tf.keras.layers.Layer):
                 trainable=False)
         parent.__init__(**kwargs)
 
-
+    # To enable model saving
     def get_config(self):
-        # To enable model saving
         config = {
             **super(NTMCell, self).get_config(),
             'controller_layers': self.controller_layers,
@@ -120,6 +129,7 @@ class NTMCell(tf.keras.layers.Layer):
         }
         return config
 
+    # Instrument the class to the amount of parameters contributed by each individual component
     def params_count(self):
         print("C:", self.controller.count_params(), end=", ")
         print("P:", self.parameters_layer.count_params(), end=", ")
@@ -134,24 +144,31 @@ class NTMCell(tf.keras.layers.Layer):
         print("O:", self.output_layer.count_params(), end=", ")
         print("M(n):", self.memory_size * self.memory_vector_dim)
 
-    # For Keras TF2 compatibility
+    # For Keras TF2 main call
     def call(self, x, prev_state):
         return self(x, NTMControllerState(*prev_state))
 
-    # For TF1 compatibility
+    # Exposing this for TF1 compatibility
+    # X - external input, prev_state - previous state
     def __call__(self, x, prev_state):
-        prev_state = NTMControllerState(*prev_state) # TF 2 compatibility
+        prev_state = NTMControllerState(*prev_state)  # TF 1 and 2 compatibility
         prev_read_vector_list = prev_state.read_vector_list
 
         controller_input = tf.concat([x] + prev_read_vector_list, axis=1)
 
+        # Connect the controller
         controller_output, controller_state = self.controller(controller_input, prev_state.controller_state)
 
         parameters = self.parameters_layer(controller_output)
+
+        # Gradient clipping with norm to prevent exploding
         parameters = tf.clip_by_value(parameters, -self.clip_value, self.clip_value)
 
-        head_parameter_list = tf.split(parameters[:, :self.num_parameters_per_head * self.num_heads], self.num_heads, axis=1)
-        erase_add_list = tf.split(parameters[:, self.num_parameters_per_head * self.num_heads:], 2 * self.write_head_num, axis=1)
+        # Parameters for read/write heads
+        head_parameter_list = tf.split(parameters[:, :self.num_parameters_per_head * self.num_heads], self.num_heads,
+                                       axis=1)
+        erase_add_list = tf.split(parameters[:, self.num_parameters_per_head * self.num_heads:],
+                                  2 * self.write_head_num, axis=1)
 
         prev_w_list = prev_state.w_list
         prev_M = prev_state.M
@@ -173,7 +190,7 @@ class NTMCell(tf.keras.layers.Layer):
         read_vector_list = []
 
         for i in range(self.read_head_num):
-            read_vector = tf.reduce_sum(tf.expand_dims(read_w_list[i], axis=2) * prev_M, axis=1) # dim -> axis
+            read_vector = tf.reduce_sum(tf.expand_dims(read_w_list[i], axis=2) * prev_M, axis=1)
             read_vector_list.append(read_vector)
 
         # Writing (Sec 3.2)
@@ -185,15 +202,18 @@ class NTMCell(tf.keras.layers.Layer):
             add_vector = tf.expand_dims(tf.tanh(erase_add_list[i * 2 + 1]), axis=1)
             M = M * (tf.ones(tf.shape(M), dtype=self.dtype) - tf.matmul(w, erase_vector)) + tf.matmul(w, add_vector)
 
+        # Determine shape of recurrent output and wire it up
         if not self.output_layer:
             if self.output_dim:
                 output_dim = self.output_dim
             else:
                 output_dim = tf.shape(x)[1]
 
-            o2o_initializer = create_linear_initializer(self.controller_units + self.memory_vector_dim * self.read_head_num)
+            o2o_initializer = create_linear_initializer(
+                self.controller_units + self.memory_vector_dim * self.read_head_num)
             self.output_layer = tf.keras.layers.Dense(output_dim, kernel_initializer=o2o_initializer)
 
+        # Form the output layer
         inner_output = tf.concat([controller_output] + read_vector_list, axis=1)
         ntm_output = self.output_layer(inner_output)
         ntm_output = tf.clip_by_value(ntm_output, -self.clip_value, self.clip_value)
@@ -212,7 +232,7 @@ class NTMCell(tf.keras.layers.Layer):
         K_amplified = tf.exp(tf.expand_dims(beta, axis=1) * K)
         w_c = K_amplified / tf.reduce_sum(K_amplified, axis=1, keepdims=True)  # eq (5)
 
-        if self.addressing_mode == 'content':  # Only focus on content
+        if self.addressing_mode == 'content':  # Limited addressing mode, otherwise use content + location
             return w_c
 
         # Sec 3.3.2 Focusing by Location
@@ -238,11 +258,14 @@ class NTMCell(tf.keras.layers.Layer):
     def get_initial_state(self, inputs=None, batch_size=None, dtype=tf.float32):
         # Wire all layers into the graph
         controller_init_state = self.controller.get_initial_state(inputs, batch_size, dtype)
-        read_vector_list = [expand(tf.tanh(tf.squeeze(wire_li(layer))), axis=0, N=batch_size) for layer in self.read_layers]
+        read_vector_list = [expand(tf.tanh(tf.squeeze(wire_li(layer))), axis=0, N=batch_size) for layer in
+                            self.read_layers]
         w_list = [expand(tf.nn.softmax(tf.squeeze(wire_li(layer))), axis=0, N=batch_size) for layer in self.w_layers]
 
+        # Connect and initialize memory
         if self.init_mode == 'learned':
-            inner_M = tf.tanh(tf.reshape(tf.squeeze(self.memory_layer(tf.ones([1, 1])), [self.memory_size, self.memory_vector_dim])))
+            inner_M = tf.tanh(
+                tf.reshape(tf.squeeze(self.memory_layer(tf.ones([1, 1])), [self.memory_size, self.memory_vector_dim])))
         elif self.init_mode == 'random':
             inner_M = tf.tanh(self.memory_layer)
         elif self.init_mode == 'constant':
@@ -258,6 +281,7 @@ class NTMCell(tf.keras.layers.Layer):
 
     @property
     def state_size(self):
+        # Sum of sizes of all internal states
         return NTMControllerState(
             controller_state=sum(sum(x) for x in self.controller.state_size),
             read_vector_list=[self.memory_vector_dim for _ in range(self.read_head_num)],
@@ -266,4 +290,5 @@ class NTMCell(tf.keras.layers.Layer):
 
     @property
     def output_size(self):
+        # Size of the output layer
         return self.output_dim
