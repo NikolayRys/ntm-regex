@@ -1,9 +1,9 @@
 # Credit: this code is derived from https://github.com/MarkPKCollier/NeuralTuringMachine/blob/master/ntm.py
 # With substantial changes to enable TF2 and Keras compatibility, eager execution, and model saving
 
-import tensorflow as tf
-import collections
-import numpy as np
+import tensorflow as tf  # For neural network
+import collections       # For storage container
+import numpy as np       # For math operations
 
 # Structure for storing the NTM state
 NTMControllerState = collections.namedtuple('NTMControllerState',
